@@ -14,6 +14,10 @@ import torch.nn.functional as F
 import model as m
 from atari_wrappers import wrap_deepmind, make_atari
 import argparse
+from PAR_SARFA import SARFA
+
+import torch.distributed.rpc as rpc
+import torch.multiprocessing as mp
 
 # 1. GPU settings
 os.environ['CUDA_VISIBLE_DEVICES'] = '1' 
@@ -57,6 +61,11 @@ policy_net.apply(policy_net.init_weights)
 
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
+
+aim_model = m.DQN(h, w, n_actions, device).to(device)
+model_file = 'SpaceInvaders_best/model_in_32600000.pth'
+aim_model.load_state_dict(torch.load('./{}'.format(model_file)))
+aim_sarfa = SARFA(aim_model)
 
 # SpaceInvaders_net = m.DQN(h, w, 6, device).to(device)
 # SpaceInvaders_net.load_state_dict(torch.load('./SpaceInvaders_best/model_in_32600000.pth'))
@@ -164,6 +173,15 @@ def optimize_model(train):
         return
     state_batch, action_batch, reward_batch, n_state_batch, done_batch = memory.sample(BATCH_SIZE)
 
+    # Add attention map to optimizing process
+    with torch.no_grad():
+        aim_attention = aim_sarfa.score_frame_fmetric(state_batch)
+    #TODO to calculate the aim_attention correctly!!
+
+    eval_sarfa = SARFA(policy_net)
+    eval_attention = eval_sarfa.score_frame_fmetric(state_batch)
+    re_loss = (torch.from_numpy((aim_attention - eval_attention))).pow(2).mean()
+
     q = policy_net(state_batch).gather(1, action_batch)
     nq = target_net(n_state_batch).max(1)[0].detach()
 
@@ -171,7 +189,7 @@ def optimize_model(train):
     expected_state_action_values = (nq * GAMMA)*(1.-done_batch[:,0]) + reward_batch[:,0]
 
     # Compute Huber loss
-    loss = F.smooth_l1_loss(q, expected_state_action_values.unsqueeze(1))
+    loss = F.smooth_l1_loss(q, expected_state_action_values.unsqueeze(1)) + 0.1 * re_loss
 
     # Optimize the model
     optimizer.zero_grad()
@@ -228,7 +246,7 @@ for step in progressive:
             n_frame = m.fp(n_frame)
             q.append(n_frame.numpy())
         
-    train = len(memory) > 50000
+    train = len(memory) > 500
     # Select and perform an action
     state = torch.from_numpy(np.concatenate(list(q))[1:][np.newaxis, :])
     action, eps = sa.select_action(state, train)
