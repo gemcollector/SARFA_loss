@@ -24,12 +24,13 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # if gpu is to be used
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', type=str)
+parser.add_argument('--name', type=str, default='SpaceInvaders')
 parser.add_argument('--func', type=str)
 # parser.add_argument('--gpu', type=int)
 parser.add_argument('--param_transfer', type=bool, default=False)
 parser.add_argument('--AAE_transfer', type=bool, default=False)
 parser.add_argument('--frozen', type=bool, default=False)
+parser.add_argument('--regular', type=float, default=0.1)
 args = parser.parse_args()
 
 
@@ -53,6 +54,7 @@ env = wrap_deepmind(env_raw, frame_stack=False, episode_life=True, clip_rewards=
 c,h,w = m.fp(env.reset()).shape
 n_actions = env.action_space.n
 print(n_actions)
+print('regular:', args.regular)
 
 # 4. Network reset
 policy_net = m.DQN(h, w, n_actions, device).to(device)
@@ -147,6 +149,7 @@ if args.frozen:
 
 
 # 5. DQN hyperparameters
+ATTENTION_UPDATE = 50
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1.
@@ -174,13 +177,13 @@ def optimize_model(train):
     state_batch, action_batch, reward_batch, n_state_batch, done_batch = memory.sample(BATCH_SIZE)
 
     # Add attention map to optimizing process
-    with torch.no_grad():
-        aim_attention = aim_sarfa.score_frame_fmetric(state_batch)
-    #TODO to calculate the aim_attention correctly!!
-
-    eval_sarfa = SARFA(policy_net)
-    eval_attention = eval_sarfa.score_frame_fmetric(state_batch)
-    re_loss = (torch.from_numpy((aim_attention - eval_attention))).pow(2).mean()
+    # with torch.no_grad():
+    #     aim_attention = aim_sarfa.score_frame_fmetric(state_batch)
+    # #TODO to calculate the aim_attention correctly!!
+    #
+    # eval_sarfa = SARFA(policy_net)
+    # eval_attention = eval_sarfa.score_frame_fmetric(state_batch)
+    # re_loss = (torch.from_numpy((aim_attention - eval_attention))).pow(2).mean()
 
     q = policy_net(state_batch).gather(1, action_batch)
     nq = target_net(n_state_batch).max(1)[0].detach()
@@ -189,7 +192,7 @@ def optimize_model(train):
     expected_state_action_values = (nq * GAMMA)*(1.-done_batch[:,0]) + reward_batch[:,0]
 
     # Compute Huber loss
-    loss = F.smooth_l1_loss(q, expected_state_action_values.unsqueeze(1)) + 0.1 * re_loss
+    loss = F.smooth_l1_loss(q, expected_state_action_values.unsqueeze(1))
 
     # Optimize the model
     optimizer.zero_grad()
@@ -199,6 +202,41 @@ def optimize_model(train):
             continue
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
+
+def attention_optimize_model(train, regular):
+    if not train:
+        return
+    for i in range(1):
+        state_batch, action_batch, reward_batch, n_state_batch, done_batch = memory.sample(BATCH_SIZE)
+
+        # Add attention map to optimizing process
+        with torch.no_grad():
+            aim_attention = aim_sarfa.score_frame_fmetric(state_batch)
+        # TODO to calculate the aim_attention correctly!!
+
+        eval_sarfa = SARFA(policy_net)
+        eval_attention = eval_sarfa.score_frame_fmetric(state_batch)
+        re_loss = (torch.from_numpy((aim_attention - eval_attention))).pow(2).mean()
+
+        q = policy_net(state_batch).gather(1, action_batch)
+        nq = target_net(n_state_batch).max(1)[0].detach()
+
+        # Compute the expected Q values
+        expected_state_action_values = (nq * GAMMA)*(1.-done_batch[:,0]) + reward_batch[:,0]
+
+        # Compute Huber loss
+        loss = F.smooth_l1_loss(q, expected_state_action_values.unsqueeze(1)) + regular * re_loss
+
+        # Optimize the model
+        optimizer.zero_grad()
+        loss.backward()
+        for param in policy_net.parameters():
+            if param.grad == None:
+                continue
+            param.grad.data.clamp_(-1, 1)
+        optimizer.step()
+
+
 
 def evaluate(step, policy_net, device, env, n_actions, eps=0.05, num_episode=5):
     env = wrap_deepmind(env)
@@ -246,7 +284,7 @@ for step in progressive:
             n_frame = m.fp(n_frame)
             q.append(n_frame.numpy())
         
-    train = len(memory) > 500
+    train = len(memory) > 50000
     # Select and perform an action
     state = torch.from_numpy(np.concatenate(list(q))[1:][np.newaxis, :])
     action, eps = sa.select_action(state, train)
@@ -267,6 +305,10 @@ for step in progressive:
     # Update the target network, copying all weights and biases in DQN
     if step % TARGET_UPDATE == 0:
         target_net.load_state_dict(policy_net.state_dict())
+
+    if step % ATTENTION_UPDATE == 0:
+        attention_optimize_model(train, args.regular)
+
     
     if (step) % EVALUATE_FREQ == 0:
         evaluate(step, policy_net, device, env_raw, n_actions, eps=0.05, num_episode=15)

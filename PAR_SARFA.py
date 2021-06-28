@@ -27,11 +27,13 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
+
 import model as m
 from atari_wrappers import wrap_deepmind, make_atari
 import gym
 import matplotlib.pyplot as plt
-
+import time
+import torchgeometry as tgm
 
 # fmetric_saliency = score_frame_fmetric(policy_net, my_image, occlude)
 # plt.imshow(fmetric_saliency)
@@ -43,7 +45,12 @@ class SARFA():
     def __init__(self, model):
         self.model = model
         self.cnt = 0
-        self.all_mask_pic = self.get_all_mask_pic()
+        # 转成tensor上GPU
+        os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.all_mask_pic = torch.from_numpy(self.get_all_mask_pic()).to(self.device)
+        self.gauss = tgm.image.GaussianBlur((7, 7), (3, 3))
+
 
     # 计算KL散度，这里用了交叉熵是一个意思
     def cross_entropy(self, L_policy, l_policy, L_idx):
@@ -87,41 +94,57 @@ class SARFA():
         all_attention_map = np.zeros((batch_state.shape[0], 84, 84))
         count = 0
         for state in batch_state:
+            t0 = time.time()
             # print('No.number:', count)
             # state = state.cpu().data.numpy()
-            state = state.unsqueeze(0)
-            occlude = lambda I, mask: I * (1 - mask) + gaussian_filter(I, sigma=3) * mask  # choose an area to blur
-
-            L =self.run_through_model(self.model, state, interp_func=occlude)
+            state = state.unsqueeze(0).float()
+            # occlude = lambda I, mask: I * (1 - mask) + gaussian_filter(I, sigma=3) * mask  # choose an area to blur
+            occlude = lambda I, mask: I * (1 - mask) + self.gauss(I) * mask
+            # L是原图输出的结果
+            t1 = time.time()
+            L =self.run_through_model(self.model, state.to(self.device), interp_func=occlude)
+            t2 = time.time()
             # print('L:', L)
+            # L_policy = F.softmax(L, dim=1)
             L_policy = softmax(L.cpu().data.numpy())
+            # L_idx = torch.argmax(L_policy, dim=1)
             L_idx = np.argmax(L_policy)
+
             # print('L_idx:', L_idx)
             d = 5
-            r = 5
-            scores = np.zeros((int(84 / d) + 1, int(84 / d) + 1))  # saliency scores S(t,i,j)
-
             # mask = self.get_mask(center=[i, j], size=[84, 84], r=r)
-            l = self.run_through_model(self.model, state, interp_func=occlude, mask=self.all_mask_pic)
-            # np.save('state_result.npy', l.cpu().data.numpy())
-            # Our f-metric
-            l_policy = softmax(l.cpu().data.numpy())
+            t3 = time.time()
+            l = self.run_through_model(self.model, state.to(self.device), interp_func=occlude, mask=self.all_mask_pic)
+            t4 = time.time()
+            # # Our f-metric
+            # l_policy = F.softmax(L, dim=1)
+            l_policy = softmax(l.cpu().data.numpy(), axis=1)
 
+            # L_policy = L_policy.expand(self.cnt, L_policy.shape[0])
             L_policy = np.repeat(L_policy[np.newaxis, :], self.cnt, axis=0)
-            # import pdb
-            # pdb.set_trace()
-            dP = L_policy[:, L_idx] - l_policy[:, L_idx]
-            K = self.cross_entropy(L_policy, l_policy, L_idx)
-            # scores[int(i / d), int(j / d)] = 2 * dP * K / (K + dP)
-            scores = (2 * dP * K / (K + dP)).reshape(289, 1).reshape((int(84 / d) + 1, int(84 / d) + 1))
 
+
+            dP = L_policy[:, L_idx] - l_policy[:, L_idx]
+
+            K = self.cross_entropy(L_policy, l_policy, L_idx)  # numpy算出来的是288.49802
+            # scores[int(i / d), int(j / d)] = 2 * dP * K / (K + dP)
+            tmp_score = (2 * dP * K / (K + dP)).reshape(289, 1)
+            tmp_score[np.where(dP<=0)] = 0
+            scores = tmp_score.reshape((int(84 / d) + 1, int(84 / d) + 1))
+            #
+            # scores = np.zeros((int(84 / d) + 1, int(84 / d) + 1))
+            #
             pmax = scores.max()
             scores = cv2.resize(scores, (84, 84),
                                 interpolation=cv2.INTER_LINEAR).astype(np.float32)
             attention_map = pmax * scores / scores.max()
+            t5 = time.time()
             all_attention_map[count] = attention_map
             count += 1
-
+            # if count == 1:
+            #     print('time:', t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)
+            #     # print('time:', t4 - t3)
+            #     return all_attention_map
 
         return all_attention_map
 
@@ -139,11 +162,15 @@ class SARFA():
                 # print('mask.shape:', mask.shape)
                 # print('history.shape:', history.shape)
                 # im = np.vstack([interp_func(history.cpu().data.numpy(), mask)])
-                im = interp_func(history.cpu().data.numpy(), mask)
+                t1 = time.time()
+                im = interp_func(history, mask)
+                t2 = time.time()
+                # print('function_time:', t2-t1)
                 # print(im.shape)
 
         # 输入的tens_state需要是一个4*84*84的向量
-        tens_state = torch.from_numpy(im)
+        # tens_state = torch.from_numpy(im)
+        tens_state = im
 
         return model(tens_state)
 
@@ -164,7 +191,9 @@ class SARFA():
 # my_state = torch.tensor(my_state).unsqueeze(0)
 # aa = sarfa.score_frame_fmetric(my_state)
 # import pickle
-# pickle.dump(file=open('try_pic.pkl','wb'), obj=aa)
+# plt.imshow(aa.reshape(84, 84))
+# plt.show()
+# pickle.dump(file=open('./try_pic_torch.pkl','wb'), obj=aa)
 
 
 # model_file = 'SpaceInvaders_best/model_in_32600000.pth'
