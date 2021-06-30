@@ -14,8 +14,8 @@ import torch.nn.functional as F
 import model as m
 from atari_wrappers import wrap_deepmind, make_atari
 import argparse
-from PAR_SARFA import SARFA
-
+from PAR_SARFA_new import SARFA
+from scipy.ndimage.filters import gaussian_filter
 import torch.distributed.rpc as rpc
 import torch.multiprocessing as mp
 
@@ -67,7 +67,30 @@ target_net.eval()
 aim_model = m.DQN(h, w, n_actions, device).to(device)
 model_file = 'SpaceInvaders_best/model_in_32600000.pth'
 aim_model.load_state_dict(torch.load('./{}'.format(model_file)))
-aim_sarfa = SARFA(aim_model)
+
+
+def get_mask(center, size, r):
+    y, x = np.ogrid[-center[0]:size[0] - center[0], -center[1]:size[1] - center[1]]
+    keep = x * x + y * y <= 1
+    mask = np.zeros(size)
+    mask[keep] = 1  # select a circle of pixels
+    mask = gaussian_filter(mask, sigma=r)  # blur the circle of pixels. this is a 2D Gaussian for r=r^2=1
+    return mask / mask.max()
+
+def get_all_mask_pic(d=5, r=5):
+    cnt = 0
+    all_mask_pic = np.zeros((int((np.ceil(84 / d)) ** 2), 4, 84, 84))
+    for i in range(0, 84, d):
+        for j in range(0, 84, d):
+            mask = get_mask(center=[i, j], size=[84, 84], r=r)[np.newaxis, :]
+            mask = np.concatenate([mask, mask, mask, mask])
+            all_mask_pic[cnt, :, :] = mask
+            cnt += 1
+
+    return all_mask_pic
+
+all_mask_pic = get_all_mask_pic()
+aim_sarfa = SARFA(aim_model, all_mask_pic)
 
 # SpaceInvaders_net = m.DQN(h, w, 6, device).to(device)
 # SpaceInvaders_net.load_state_dict(torch.load('./SpaceInvaders_best/model_in_32600000.pth'))
@@ -149,7 +172,7 @@ if args.frozen:
 
 
 # 5. DQN hyperparameters
-ATTENTION_UPDATE = 50
+ATTENTION_UPDATE = 10
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1.
@@ -214,7 +237,7 @@ def attention_optimize_model(train, regular):
             aim_attention = aim_sarfa.score_frame_fmetric(state_batch)
         # TODO to calculate the aim_attention correctly!!
 
-        eval_sarfa = SARFA(policy_net)
+        eval_sarfa = SARFA(policy_net, all_mask_pic)
         eval_attention = eval_sarfa.score_frame_fmetric(state_batch)
         re_loss = (torch.from_numpy((aim_attention - eval_attention))).pow(2).mean()
 
@@ -284,7 +307,7 @@ for step in progressive:
             n_frame = m.fp(n_frame)
             q.append(n_frame.numpy())
         
-    train = len(memory) > 50000
+    train = len(memory) > 5000
     # Select and perform an action
     state = torch.from_numpy(np.concatenate(list(q))[1:][np.newaxis, :])
     action, eps = sa.select_action(state, train)
