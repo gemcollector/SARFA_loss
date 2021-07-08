@@ -48,7 +48,7 @@ class SARFA():
         os.environ['CUDA_VISIBLE_DEVICES'] = '1'
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.all_mask_pic = torch.from_numpy(all_mask_pic).unsqueeze(0).to(self.device)
-        self.gauss = tgm.image.GaussianBlur((7, 7), (3, 3))
+        self.gauss = tgm.image.GaussianBlur((13, 13), (3, 3))
         # self.batch_size_list = [i for i in range(2)]
         # self.mask_size_list = [i for i in range(289)]
 
@@ -98,8 +98,8 @@ class SARFA():
         L = self.run_through_model(self.model, batch_state.to(self.device), interp_func=occlude) #()
         L_policy = softmax(L.cpu().data.numpy(), axis=1) #(batch_size, 6)
         L_idx = np.argmax(L_policy, axis=1)   #(batch_size, 1)
-        L_idx = np.repeat(L_idx.reshape(-1, 1), 289, axis=1)
-
+        L_idx = np.repeat(L_idx.reshape(-1, 1), 289, axis=1) #(batch_size, 289)
+        # print(L_idx)
         l = self.run_through_model(self.model, batch_state.to(self.device), interp_func=occlude, mask=self.all_mask_pic)
         l_policy = softmax(l.cpu().data.numpy(), axis=2) #(batch_size, 289, 6)
 
@@ -121,6 +121,7 @@ class SARFA():
             # print(attention_map)
             all_attention_map[count] = attention_map
             count += 1
+
         return  all_attention_map
 
 
@@ -160,52 +161,52 @@ class SARFA():
                 return model(tens_state).reshape(history.shape[0], 289, 6)
 
 
-def get_mask(center, size, r):
-    y, x = np.ogrid[-center[0]:size[0] - center[0], -center[1]:size[1] - center[1]]
-    keep = x * x + y * y <= 1
-    mask = np.zeros(size)
-    mask[keep] = 1  # select a circle of pixels
-    mask = gaussian_filter(mask, sigma=r)  # blur the circle of pixels. this is a 2D Gaussian for r=r^2=1
-    return mask / mask.max()
-
-def get_all_mask_pic(d=5, r=5):
-    cnt = 0
-    all_mask_pic = np.zeros((int((np.ceil(84 / d)) ** 2), 4, 84, 84))
-    for i in range(0, 84, d):
-        for j in range(0, 84, d):
-            mask = get_mask(center=[i, j], size=[84, 84], r=r)[np.newaxis, :]
-            mask = np.concatenate([mask, mask, mask, mask])
-            all_mask_pic[cnt, :, :] = mask
-            cnt += 1
-
-    return all_mask_pic
-
-all_mask_pic = get_all_mask_pic()
-
-
-env_name = 'SpaceInvaders'
-env_raw = make_atari('{}NoFrameskip-v4'.format(env_name))
-env = wrap_deepmind(env_raw, frame_stack=False, episode_life=True, clip_rewards=True)
-
-
-my_state_1 = np.load('my_pic.npy')[np.newaxis, :] * 255.
-my_state_2 = np.load('my_pic_2.npy')[np.newaxis, :] * 255.
-my_state = torch.tensor(np.vstack([my_state_1, my_state_2]))
-
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # if gpu is to be used
-model = m.DQN(84, 84, 6, device).to(device)
-model_file = 'SpaceInvaders_best/model_in_32600000.pth'
-model.load_state_dict(torch.load('./{}'.format(model_file)))
-sarfa = SARFA(model, all_mask_pic)
-# my_state = torch.tensor(my_state).unsqueeze(0)
-aa = sarfa.score_frame_fmetric(my_state)
-
-import pickle
-plt.imshow(aa[0])
-plt.show()
-pickle.dump(file=open('./try_pic_torch.pkl','wb'), obj=aa)
+# def get_mask(center, size, r):
+#     y, x = np.ogrid[-center[0]:size[0] - center[0], -center[1]:size[1] - center[1]]
+#     keep = x * x + y * y <= 1
+#     mask = np.zeros(size)
+#     mask[keep] = 1  # select a circle of pixels
+#     mask = gaussian_filter(mask, sigma=r)  # blur the circle of pixels. this is a 2D Gaussian for r=r^2=1
+#     return mask / mask.max()
+#
+# def get_all_mask_pic(d=5, r=5):
+#     cnt = 0
+#     all_mask_pic = np.zeros((int((np.ceil(84 / d)) ** 2), 4, 84, 84))
+#     for i in range(0, 84, d):
+#         for j in range(0, 84, d):
+#             mask = get_mask(center=[i, j], size=[84, 84], r=r)[np.newaxis, :]
+#             mask = np.concatenate([mask, mask, mask, mask])
+#             all_mask_pic[cnt, :, :] = mask
+#             cnt += 1
+#
+#     return all_mask_pic
+#
+# all_mask_pic = get_all_mask_pic()
+#
+#
+# env_name = 'SpaceInvaders'
+# env_raw = make_atari('{}NoFrameskip-v4'.format(env_name))
+# env = wrap_deepmind(env_raw, frame_stack=False, episode_life=True, clip_rewards=True)
+#
+#
+# my_state_1 = np.load('my_pic.npy')[np.newaxis, :] * 255.
+# my_state_2 = np.load('my_pic_2.npy')[np.newaxis, :] * 255.
+# my_state = torch.tensor(np.vstack([my_state_1, my_state_2]))
+#
+#
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # if gpu is to be used
+# model = m.DQN(84, 84, 6, device).to(device)
+# model_file = 'SpaceInvaders_best/model_in_32600000.pth'
+# model.load_state_dict(torch.load('./{}'.format(model_file)))
+# sarfa = SARFA(model, all_mask_pic)
+# # my_state = torch.tensor(my_state).unsqueeze(0)
+# aa = sarfa.score_frame_fmetric(my_state)
+# #
+# # import pickle
+# plt.imshow(aa[0])
+# plt.show()
+# pickle.dump(file=open('./try_pic_torch.pkl','wb'), obj=aa)
 
 
 # model_file = 'SpaceInvaders_best/model_in_32600000.pth'
