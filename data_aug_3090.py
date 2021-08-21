@@ -15,8 +15,8 @@ from scipy.ndimage.filters import gaussian_filter
 from mydataset import OriginDataset
 import torch.optim as optim
 
-
 def main():
+    
     device_num = 2
     device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")  # if gpu is to be used
     param_path = './model/origin_model/origin_1.pth'
@@ -29,8 +29,8 @@ def main():
 
 
     actor_critic_playerB = Policy(envs.observation_space.shape,
-                                  envs.action_space,
-                                  base_kwargs={'recurrent': False})
+                          envs.action_space,
+                          base_kwargs={'recurrent': False})
     actor_critic_playerB.load_state_dict(torch.load(param_path, map_location='cpu')[0].state_dict())
     actor_critic_playerB.to(device)
 
@@ -54,35 +54,35 @@ def main():
                 cnt += 1
         return all_mask_pic
 
+
     all_mask_pic = get_all_mask_pic()
     aim_sarfa = SARFA(actor_critic, all_mask_pic, device_num)
 
-    BATCH_SIZE = 128
+    BATCH_SIZE = 128  #variant_rectangle=64, noise=128
     origindataset = OriginDataset()
     origin_data_loader = torch.utils.data.DataLoader(dataset=origindataset,
                                                      batch_size=BATCH_SIZE,
                                                      shuffle=True)
-    # 目前最佳adam lr=5e-4 eps=1e-5 训练一大轮没什么问题
+
     optimizer = optim.Adam(actor_critic_playerB.parameters(), lr=5e-4, eps=1e-5)
-    # optimizer = optim.RMSprop(actor_critic_playerB.parameters(), lr=6e-4, alpha=0.95)
     max_grad_norm = 0.5
 
+    best_loss = 1
     def frame_process(frame, variant):
-        # random_num = np.random.randint(50)
+        random_num = np.random.randint(40, 80)
         if variant == 'variant-rectangle':
             width = 2
             random_width = np.random.randint(1, 5)
             width = width + random_width
             random_num = np.random.randint(-30, 30)
             random_num2 = np.random.randint(-30, 30)
-            frame[:, :, 40 + random_num:40 + random_num + width, :][:, :, :,35 + random_num2:35 + random_num2 + width] = 40 + random_num2
+            frame[:, :, 40 + random_num:40 + random_num + width, :][:, :, :, 35 + random_num2:35 + random_num2 + width] = 40 + random_num2
         elif variant == 'noise':
-            noise = np.random.normal(0, 100 ** 0.5, (BATCH_SIZE, 4, 84, 84))
+            noise = np.random.normal(0, random_num ** 0.5, (BATCH_SIZE, 4, 84, 84))
             frame = frame + noise
         return frame
 
-    best_loss = 1
-    for epoch in range(5):
+    for epoch in range(10):
         print('epoch:.{}'.format(epoch))
         for i, image in enumerate(origin_data_loader):
             if image.shape[0] != BATCH_SIZE:
@@ -93,7 +93,7 @@ def main():
 
             eval_sarfa = SARFA(actor_critic_playerB, all_mask_pic, device_num)
 
-            noise_image = frame_process(image, 'variant-rectangle').float()
+            noise_image = frame_process(image, 'variant_rectangle').float()
 
             eval_attention, _ = eval_sarfa.score_frame(noise_image, 0, 0)
 
@@ -106,21 +106,35 @@ def main():
             nn.utils.clip_grad_norm_(actor_critic_playerB.parameters(),
                                      max_grad_norm)
 
+
             optimizer.step()
 
             if re_loss.item() < best_loss:
+                print('saving!!!!')
                 best_loss = re_loss
-                torch.save([actor_critic_playerB],
-                           './model/offline_model/offline_guide_lr=5e-4_x100_adam_noise=100_best.pth')
+                torch.save([actor_critic_playerB], './model/offline_model/offline_guide_interrupt=variant_rectangle_best_lr=5e-4.pth')
 
             if i % 50 == 0:
                 print('this time loss {}'.format(re_loss))
-                # plt.imshow(aim_attention[0])
-                # plt.show()
-                # plt.imshow(eval_attention[0])
-                # plt.show()
+    
+    
+        torch.save([actor_critic_playerB], './model/offline_model/offline_guide_interrupt=variant_rectangle_{}_lr=5e-4.pth'.format(epoch))
 
-        torch.save([actor_critic_playerB], './model/offline_model/offline_guide_lr=5e-4_{}x100_adam_noise=100.pth'.format(epoch))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
